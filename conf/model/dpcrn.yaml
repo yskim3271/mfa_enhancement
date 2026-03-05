@@ -1,0 +1,8 @@
+model_lib: dpcrn
+model_class: DPCRN
+input_type: throat
+
+param:
+  enc_channels: [32, 32, 32, 64, 128]
+  num_dprnn: 2
+  dprnn_hidden: 128

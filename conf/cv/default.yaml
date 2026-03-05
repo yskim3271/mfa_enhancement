@@ -1,0 +1,4 @@
+# Cross-validation settings (disabled by default)
+enabled: false
+fold_index: 1         # Current fold (1-based, 1 to num_folds)
+num_folds: 5          # Total number of folds (= number of speaker groups)

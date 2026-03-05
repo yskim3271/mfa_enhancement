@@ -1,0 +1,12 @@
+torch
+torchaudio
+hydra-core
+omegaconf
+datasets
+pesq
+scipy
+numpy
+tensorboard
+# Optional: STT evaluation
+# transformers
+# nlptutti

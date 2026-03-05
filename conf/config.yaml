@@ -1,0 +1,76 @@
+defaults:
+  - _self_
+  - cv: default
+  - override hydra/job_logging: colorlog
+  - override hydra/hydra_logging: colorlog
+
+# Dataset (Vibravox only)
+dataset: yskim3271/vibravox_16k
+sampling_rate: 16000
+segment: 64000
+stride: 32000
+
+# STFT
+n_fft: 400
+hop_size: 100
+win_size: 400
+compress_factor: 0.3
+
+batch_size: 16
+epochs: 200
+
+eval_every: 200  # compute test metrics every so epochs
+
+# Loss related
+loss:
+  magnitude: 0.9
+  phase: 0.3
+  complex: 0.1
+  consistency: 0.05
+  embedding: 0.1
+  metric: 0.05
+
+embedding_loss:
+  enabled: true
+  model_name: "Cnam-LMSSC/wav2vec2-french-phonemizer"
+  layer: 5
+
+metricgan:
+  enabled: false
+
+# Optimization related
+lr: 5e-4
+lr_decay: 0.99
+optim: adamW
+betas: [0.8, 0.99]
+max_grad_norm: 5.0  # Gradient clipping threshold
+
+# Logging and printing
+device: cuda
+num_prints: 10
+num_workers: 5
+
+continue_from:
+log_dir: tensorbd
+save_code: true
+
+# Other stuff
+seed: 2039
+
+# Hydra config
+hydra:
+  run:
+    dir: ./results/experiments/${now:%Y-%m-%d_%H-%M-%S}
+  job:
+    chdir: true
+  job_logging:
+    handlers:
+      file:
+        class: logging.FileHandler
+        mode: w
+        formatter: colorlog
+        filename: trainer.log
+      console:
+        class: logging.StreamHandler
+        formatter: colorlog
+        stream: ext://sys.stderr
