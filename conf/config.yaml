@@ -36,7 +36,7 @@ embedding_loss:
   layer: 5
 
 metricgan:
-  enabled: false
+  enabled: true
 
 # Optimization related
 lr: 5e-4
