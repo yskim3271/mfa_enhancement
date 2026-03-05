@@ -7,6 +7,8 @@ pesq
 scipy
 numpy
 tensorboard
+joblib
+hydra-colorlog
 # Optional: STT evaluation
 # transformers
 # nlptutti
