@@ -34,6 +34,7 @@ embedding_loss:
   enabled: true
   model_name: "Cnam-LMSSC/wav2vec2-french-phonemizer"
   layer: 5
+  squared: false
 
 metricgan:
   enabled: true

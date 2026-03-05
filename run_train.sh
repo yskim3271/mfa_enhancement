@@ -122,7 +122,7 @@ log "SSH: $SSH_HOST port $SSH_PORT"
 # 2. Pod setup: clone/pull + dependencies
 log "Setting up pod (repo + dependencies)..."
 remote_exec "$SSH_HOST" "$SSH_PORT" \
-    "if [ -d $REMOTE_PROJECT/.git ]; then cd $REMOTE_PROJECT && git pull --ff-only; else cd /workspace && git clone https://github.com/yskim3271/mfa_enhancement.git; fi" \
+    "if [ -d $REMOTE_PROJECT/.git ]; then cd $REMOTE_PROJECT && git pull --ff-only origin master; else cd /workspace && git clone https://github.com/yskim3271/mfa_enhancement.git; fi" \
     2>&1 | tee -a "$LOG_FILE"
 
 remote_exec "$SSH_HOST" "$SSH_PORT" \
