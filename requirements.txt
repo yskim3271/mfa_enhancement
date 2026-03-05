@@ -9,6 +9,7 @@ numpy
 tensorboard
 joblib
 hydra-colorlog
+torchcodec
 # Optional: STT evaluation
 # transformers
 # nlptutti
