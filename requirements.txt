@@ -2,7 +2,8 @@ torch
 torchaudio
 hydra-core
 omegaconf
-datasets
+datasets<4
+librosa
 pesq
 scipy
 numpy

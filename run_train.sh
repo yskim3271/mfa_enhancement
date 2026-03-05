@@ -126,7 +126,7 @@ remote_exec "$SSH_HOST" "$SSH_PORT" \
     2>&1 | tee -a "$LOG_FILE"
 
 remote_exec "$SSH_HOST" "$SSH_PORT" \
-    "apt-get update -qq && apt-get install -y -qq libsndfile1 > /dev/null 2>&1; pip uninstall -y torchcodec > /dev/null 2>&1; cd $REMOTE_PROJECT && pip install -q --break-system-packages -r requirements.txt && pip install -q --break-system-packages transformers" \
+    "apt-get update -qq && apt-get install -y -qq libsndfile1 ffmpeg > /dev/null 2>&1; cd $REMOTE_PROJECT && pip install -q --break-system-packages -r requirements.txt && pip install -q --break-system-packages transformers" \
     2>&1 | tee -a "$LOG_FILE"
 
 # 3. Build training command
