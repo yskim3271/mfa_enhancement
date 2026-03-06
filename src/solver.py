@@ -42,6 +42,7 @@ class Solver(object):
         # loss weights
         self.loss = args.loss
         self.embedding_loss = embedding_loss
+        self.phase_detach = args.get("embedding_loss", {}).get("phase_detach", False)
 
         # logger
         self.logger = logger
@@ -305,7 +306,11 @@ class Solver(object):
             loss_consistency = F.mse_loss(est_com, est_com_con) * 2
 
             if self.embedding_loss is not None:
-                loss_embedding = self.embedding_loss(est_audio, acoustic.to(self.device))
+                if self.phase_detach:
+                    est_audio_emb = mag_pha_istft(est_mag, est_pha.detach(), **self.stft_args)
+                    loss_embedding = self.embedding_loss(est_audio_emb, acoustic.to(self.device))
+                else:
+                    loss_embedding = self.embedding_loss(est_audio, acoustic.to(self.device))
             else:
                 loss_embedding = torch.tensor(0.0, device=self.device)
 
