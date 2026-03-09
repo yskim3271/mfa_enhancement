@@ -250,11 +250,15 @@ def run(args):
         embedding_loss = EmbeddingLoss(
             model_name=emb_cfg.model_name,
             layer=emb_cfg.layer,
-            squared=emb_cfg.get("squared", False),
-            silence_db=emb_cfg.get("silence_db", None),
-            energy_floor_db=emb_cfg.get("energy_floor_db", None),
+            risk_calibrated=emb_cfg.get("risk_calibrated", False),
+            risk_beta=tuple(emb_cfg.get("risk_beta", [-4.85, 6.72])),
+            local_window=emb_cfg.get("local_window", 0),
         ).to(device)
         logger.info(f"EmbeddingLoss enabled: model={emb_cfg.model_name}, layer={emb_cfg.layer}")
+        if emb_cfg.get("risk_calibrated", False):
+            logger.info(f"  Risk-calibrated loss: beta={list(emb_cfg.risk_beta)}")
+        if emb_cfg.get("local_window", 0) > 0:
+            logger.info(f"  Local-window alignment: K={emb_cfg.local_window}")
 
     # Solver
     solver = Solver(

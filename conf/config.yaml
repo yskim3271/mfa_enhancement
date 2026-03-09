@@ -34,9 +34,10 @@ embedding_loss:
   enabled: true
   model_name: "Cnam-LMSSC/wav2vec2-french-phonemizer"
   layer: 5
-  squared: true
-  silence_db: -30
   phase_detach: true
+  risk_calibrated: false          # σ(β0 + β1·d) loss
+  risk_beta: [-4.85, 6.72]       # [β0, β1] from diagnostic logistic regression
+  local_window: 0                 # 0 = exact match, K≥1 = local window (±K frames)
 
 metricgan:
   enabled: true

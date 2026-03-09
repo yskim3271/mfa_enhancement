@@ -1,6 +1,11 @@
+import logging
+
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from transformers import Wav2Vec2Model
+
+logger = logging.getLogger(__name__)
 
 
 class EmbeddingLoss(nn.Module):
@@ -11,16 +16,17 @@ class EmbeddingLoss(nn.Module):
     Gradients flow back through wav2vec2 to the enhancement model via enhanced input.
     """
 
-    # wav2vec2 CNN feature extractor total stride: 5*2*2*2*2*2*2 = 320 samples
-    WAV2VEC2_STRIDE = 320
-
-    def __init__(self, model_name: str, layer: int, squared: bool = False,
-                 silence_db: float = None, energy_floor_db: float = None):
+    def __init__(self, model_name: str, layer: int,
+                 risk_calibrated: bool = False, risk_beta: tuple = (-4.85, 6.72),
+                 local_window: int = 0):
         super().__init__()
         self.layer = layer
-        self.squared = squared
-        self.silence_db = silence_db
-        self.energy_floor_db = energy_floor_db
+        self.risk_calibrated = risk_calibrated
+        self.local_window = local_window
+
+        # Store risk calibration coefficients as buffer (saved in checkpoint)
+        self.register_buffer("risk_beta0", torch.tensor(float(risk_beta[0])))
+        self.register_buffer("risk_beta1", torch.tensor(float(risk_beta[1])))
 
         model = Wav2Vec2Model.from_pretrained(
             model_name, output_hidden_states=True
@@ -54,66 +60,32 @@ class EmbeddingLoss(nn.Module):
         # hidden_states[0] = CNN output, [1..N] = transformer layers
         return out.hidden_states[self.layer]
 
-    def _silence_mask(self, acoustic, n_frames):
-        """Create mask to exclude silence frames based on acoustic energy.
+    def _compute_local_window_dist(self, emb_enhanced, emb_acoustic):
+        """Compute cosine distance with local-window alignment (hard min).
+
+        For each enhanced frame t, find the minimum cosine distance among
+        acoustic frames in [t-K, t+K], tolerating minor boundary jitter.
 
         Args:
-            acoustic: [B, T] reference waveform (detached)
-            n_frames: number of wav2vec2 frames
+            emb_enhanced: [B, T, D] enhanced embeddings
+            emb_acoustic: [B, T, D] acoustic embeddings
 
         Returns:
-            [B, n_frames] bool tensor, True = non-silence (keep)
+            [B, T] minimum cosine distance per frame
         """
-        stride = self.WAV2VEC2_STRIDE
-        # Frame-level energy: unfold into [B, n_local_frames, stride]
-        frames = acoustic.unfold(-1, stride, stride)
-        energy = (frames ** 2).mean(dim=-1)  # [B, n_local_frames]
-        energy = energy[:, :n_frames]
-
-        # Pad if wav2vec2 produces more frames than simple striding
-        if energy.shape[-1] < n_frames:
-            pad = torch.zeros(
-                energy.shape[0], n_frames - energy.shape[-1],
-                device=energy.device,
-            )
-            energy = torch.cat([energy, pad], dim=-1)
-
-        # Relative dB threshold: frames below (max_energy + silence_db) are silence
-        max_energy = energy.max(dim=-1, keepdim=True).values.clamp(min=1e-10)
-        energy_db = 10 * torch.log10(energy.clamp(min=1e-10) / max_energy)
-        return energy_db > self.silence_db
-
-    def _energy_weight(self, acoustic, n_frames):
-        """Compute continuous energy-based weight (normalized dB).
-
-        Maps frame energy to [0, 1] linearly in dB domain.
-        Frames at 0 dB (max energy) get weight 1.0,
-        frames at energy_floor_db get weight 0.0.
-
-        Args:
-            acoustic: [B, T] reference waveform (detached)
-            n_frames: number of wav2vec2 frames
-
-        Returns:
-            [B, n_frames] float tensor in [0, 1]
-        """
-        stride = self.WAV2VEC2_STRIDE
-        frames = acoustic.unfold(-1, stride, stride)
-        energy = (frames ** 2).mean(dim=-1)  # [B, n_local_frames]
-        energy = energy[:, :n_frames]
-
-        if energy.shape[-1] < n_frames:
-            pad = torch.zeros(
-                energy.shape[0], n_frames - energy.shape[-1],
-                device=energy.device,
-            )
-            energy = torch.cat([energy, pad], dim=-1)
-
-        max_energy = energy.max(dim=-1, keepdim=True).values.clamp(min=1e-10)
-        energy_db = 10 * torch.log10(energy.clamp(min=1e-10) / max_energy)
-        # Linear in dB: floor_db → 0.0, 0 dB → 1.0
-        weight = (energy_db - self.energy_floor_db) / (-self.energy_floor_db)
-        return weight.clamp(min=0.0, max=1.0)
+        K = self.local_window
+        T = emb_enhanced.shape[1]
+        dists = []
+        for delta in range(-K, K + 1):
+            if delta == 0:
+                ac_shifted = emb_acoustic
+            elif delta > 0:
+                ac_shifted = F.pad(emb_acoustic[:, delta:, :], (0, 0, 0, delta))
+            else:
+                ac_shifted = F.pad(emb_acoustic[:, :delta, :], (0, 0, -delta, 0))
+            d = 1 - F.cosine_similarity(emb_enhanced, ac_shifted[:, :T, :], dim=-1)
+            dists.append(d)
+        return torch.stack(dists, dim=-1).min(dim=-1).values
 
     def forward(self, enhanced, acoustic):
         """Compute mean cosine distance between enhanced and acoustic embeddings.
@@ -134,23 +106,15 @@ class EmbeddingLoss(nn.Module):
         with torch.no_grad():
             emb_acoustic = self._extract(acoustic.detach())
 
-        # Cosine distance: 1 - cosine_similarity
-        cos_sim = nn.functional.cosine_similarity(
-            emb_enhanced, emb_acoustic, dim=-1
-        )
-        dist = 1 - cos_sim
-        if self.squared:
-            dist = dist ** 2
+        # Cosine distance
+        if self.local_window > 0:
+            dist = self._compute_local_window_dist(emb_enhanced, emb_acoustic)
+        else:
+            cos_sim = F.cosine_similarity(emb_enhanced, emb_acoustic, dim=-1)
+            dist = 1 - cos_sim
 
-        # Apply energy weighting or silence masking
-        if self.energy_floor_db is not None:
-            with torch.no_grad():
-                weight = self._energy_weight(acoustic.detach(), dist.shape[-1])
-            return (dist * weight).sum() / weight.sum()
-        elif self.silence_db is not None:
-            with torch.no_grad():
-                mask = self._silence_mask(acoustic.detach(), dist.shape[-1])
-            if mask.any():
-                return (dist * mask).sum() / mask.sum()
+        # Transform: risk calibration
+        if self.risk_calibrated:
+            dist = torch.sigmoid(self.risk_beta0 + self.risk_beta1 * dist)
 
         return dist.mean()
