@@ -251,6 +251,8 @@ def run(args):
             model_name=emb_cfg.model_name,
             layer=emb_cfg.layer,
             squared=emb_cfg.get("squared", False),
+            silence_db=emb_cfg.get("silence_db", None),
+            energy_floor_db=emb_cfg.get("energy_floor_db", None),
         ).to(device)
         logger.info(f"EmbeddingLoss enabled: model={emb_cfg.model_name}, layer={emb_cfg.layer}")
 

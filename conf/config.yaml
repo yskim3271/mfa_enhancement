@@ -27,14 +27,16 @@ loss:
   phase: 0.3
   complex: 0.1
   consistency: 0.05
-  embedding: 0.1
+  embedding: 0.02
   metric: 0.05
 
 embedding_loss:
   enabled: true
   model_name: "Cnam-LMSSC/wav2vec2-french-phonemizer"
   layer: 5
-  squared: false
+  squared: true
+  silence_db: -30
+  phase_detach: true
 
 metricgan:
   enabled: true
