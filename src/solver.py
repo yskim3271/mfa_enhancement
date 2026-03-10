@@ -334,30 +334,35 @@ class Solver(object):
 
             # --- Embedding MetricGAN: Discriminator training ---
             loss_disc_emb_scalar = 0.0
+            n_frames = None
             if self.disc_emb is not None:
                 self.disc_emb.train()
 
                 # Teacher targets: extract acoustic once, reuse for both pairs
                 acoustic_dev = acoustic.to(self.device)
                 z_ac = self.emb_extractor.extract_embeddings(acoustic_dev)
-                q_throat = self.emb_extractor.compute_quality(
+                q_throat = self.emb_extractor.compute_frame_quality(
                     acoustic_dev, throat.to(self.device), z_ac=z_ac)
-                q_enhanced = self.emb_extractor.compute_quality(
+                q_enhanced = self.emb_extractor.compute_frame_quality(
                     acoustic_dev, est_audio.detach(), z_ac=z_ac)
+                n_frames = q_throat.shape[1]
 
                 self.optim_disc_emb.zero_grad()
 
                 metric_emb_r = self.disc_emb(
-                    target_mag.unsqueeze(1), target_mag.unsqueeze(1))
+                    target_mag.unsqueeze(1), target_mag.unsqueeze(1),
+                    n_frames=n_frames)
                 metric_emb_th = self.disc_emb(
-                    target_mag.unsqueeze(1), throat_mag.unsqueeze(1))
+                    target_mag.unsqueeze(1), throat_mag.unsqueeze(1),
+                    n_frames=n_frames)
                 metric_emb_g = self.disc_emb(
-                    target_mag.unsqueeze(1), est_mag_con.detach().unsqueeze(1))
+                    target_mag.unsqueeze(1), est_mag_con.detach().unsqueeze(1),
+                    n_frames=n_frames)
 
                 loss_disc_emb = (
-                    F.mse_loss(metric_emb_r.flatten(), one_labels) +
-                    F.mse_loss(metric_emb_th.flatten(), q_throat) +
-                    F.mse_loss(metric_emb_g.flatten(), q_enhanced))
+                    F.mse_loss(metric_emb_r, torch.ones_like(q_throat)) +
+                    F.mse_loss(metric_emb_th, q_throat) +
+                    F.mse_loss(metric_emb_g, q_enhanced))
 
                 loss_disc_emb.backward()
                 torch.nn.utils.clip_grad_norm_(
@@ -398,8 +403,9 @@ class Solver(object):
             loss_metric_emb = torch.tensor(0.0, device=self.device)
             if self.disc_emb is not None:
                 metric_emb_g = self.disc_emb(
-                    target_mag.unsqueeze(1), est_mag_con.unsqueeze(1))
-                loss_metric_emb = F.mse_loss(metric_emb_g.flatten(), one_labels)
+                    target_mag.unsqueeze(1), est_mag_con.unsqueeze(1),
+                    n_frames=n_frames)
+                loss_metric_emb = F.mse_loss(metric_emb_g, torch.ones_like(metric_emb_g))
                 loss = loss + loss_metric_emb * self.loss.get("metric_emb", 0.0)
 
             loss_dict = {

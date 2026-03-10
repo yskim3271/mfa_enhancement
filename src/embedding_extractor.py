@@ -56,8 +56,8 @@ class EmbeddingQualityExtractor(nn.Module):
         return self._extract(waveform)
 
     @torch.no_grad()
-    def compute_quality(self, acoustic, pair, z_ac=None):
-        """Compute embedding quality score q in [0, 1].
+    def compute_frame_quality(self, acoustic, pair, z_ac=None):
+        """Compute frame-level embedding quality scores q_t in [0, 1].
 
         Args:
             acoustic: [B, T_samples] reference waveform
@@ -67,7 +67,8 @@ class EmbeddingQualityExtractor(nn.Module):
                   with the same acoustic reference)
 
         Returns:
-            q: [B] quality scores. 1.0 = identical to acoustic, 0.0 = max divergence.
+            q_t: [B, T_w2v] per-frame quality scores.
+                 1.0 = identical to acoustic, 0.0 = max divergence.
         """
         # Align waveform lengths
         min_len = min(acoustic.shape[-1], pair.shape[-1])
@@ -84,13 +85,7 @@ class EmbeddingQualityExtractor(nn.Module):
         z_ac = z_ac[:, :min_frames, :]
         z_pair = z_pair[:, :min_frames, :]
 
-        # Frame-level cosine distance d_t = 1 - cos_sim
-        d_t = 1 - F.cosine_similarity(z_ac, z_pair, dim=-1)  # [B, T]
+        # Frame-level quality: cosine similarity clamped to [0, 1]
+        q_t = F.cosine_similarity(z_ac, z_pair, dim=-1).clamp(min=0.0, max=1.0)  # [B, T_w2v]
 
-        # Utterance-level difficulty score
-        s = d_t.mean(dim=1)  # [B]
-
-        # Quality score: q = 1 - s/2, range [0, 1]
-        q = 1 - s / 2
-
-        return q
+        return q_t

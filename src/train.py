@@ -269,7 +269,7 @@ def run(args):
     emb_metricgan_cfg = args.get("embedding_metricgan", {})
     if emb_metricgan_cfg.get("enabled", False):
         from .embedding_extractor import EmbeddingQualityExtractor
-        from .models.discriminator import MetricGAN_Discriminator
+        from .models.discriminator import FrameLevelEmbeddingCritic
 
         # Reuse wav2vec2 from EmbeddingLoss if model/layer match
         shared_model = None
@@ -285,7 +285,7 @@ def run(args):
             shared_model=shared_model,
         ).to(device)
 
-        disc_emb = MetricGAN_Discriminator().to(device)
+        disc_emb = FrameLevelEmbeddingCritic(ndf=16).to(device)
         optim_disc_emb = optim_class(disc_emb.parameters(), lr=args.lr, betas=args.betas)
         if args.lr_decay is not None:
             scheduler_disc_emb = torch.optim.lr_scheduler.ExponentialLR(

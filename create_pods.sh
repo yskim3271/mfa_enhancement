@@ -92,7 +92,7 @@ wait_ssh() {
         if [[ -z "$pod_id" ]]; then
             pod_id=$(get_pod_id "$name")
             if [[ -z "$pod_id" ]]; then
-                log "$name: Pod not RUNNING yet (attempt $attempt/$max_attempts)"
+                log "$name: Pod not RUNNING yet (attempt $attempt/$max_attempts)" >&2
                 sleep 10
                 continue
             fi
@@ -101,7 +101,7 @@ wait_ssh() {
         local ssh_cmd
         ssh_cmd=$(get_ssh_info "$pod_id" 2>/dev/null || true)
         if [[ -z "$ssh_cmd" ]]; then
-            log "$name: SSH info not available yet (attempt $attempt/$max_attempts)"
+            log "$name: SSH info not available yet (attempt $attempt/$max_attempts)" >&2
             sleep 10
             continue
         fi
@@ -111,16 +111,16 @@ wait_ssh() {
         ssh_port=$(echo "$ssh_cmd" | awk '{print $4}')
 
         if ssh $SSH_OPTS -p "$ssh_port" "$ssh_host" "echo ready" &>/dev/null; then
-            log "$name: SSH 접속 가능 ($ssh_host:$ssh_port)"
+            log "$name: SSH 접속 가능 ($ssh_host:$ssh_port)" >&2
             echo "$ssh_host $ssh_port"
             return 0
         fi
 
-        log "$name: SSH 연결 대기 중 (attempt $attempt/$max_attempts)"
+        log "$name: SSH 연결 대기 중 (attempt $attempt/$max_attempts)" >&2
         sleep 10
     done
 
-    log "$name: SSH 접속 시간 초과"
+    log "$name: SSH 접속 시간 초과" >&2
     return 1
 }
 
