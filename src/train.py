@@ -260,6 +260,40 @@ def run(args):
         if emb_cfg.get("local_window", 0) > 0:
             logger.info(f"  Local-window alignment: K={emb_cfg.local_window}")
 
+    # Embedding MetricGAN (optional)
+    disc_emb = None
+    optim_disc_emb = None
+    scheduler_disc_emb = None
+    emb_extractor = None
+
+    emb_metricgan_cfg = args.get("embedding_metricgan", {})
+    if emb_metricgan_cfg.get("enabled", False):
+        from .embedding_extractor import EmbeddingQualityExtractor
+        from .models.discriminator import MetricGAN_Discriminator
+
+        # Reuse wav2vec2 from EmbeddingLoss if model/layer match
+        shared_model = None
+        if embedding_loss is not None:
+            if (emb_cfg.model_name == emb_metricgan_cfg.model_name
+                    and emb_cfg.layer == emb_metricgan_cfg.layer):
+                shared_model = embedding_loss.model
+            else:
+                logger.info("EmbeddingLoss and EmbeddingMetricGAN use different model/layer; loading separate model")
+        emb_extractor = EmbeddingQualityExtractor(
+            model_name=emb_metricgan_cfg.model_name,
+            layer=emb_metricgan_cfg.layer,
+            shared_model=shared_model,
+        ).to(device)
+
+        disc_emb = MetricGAN_Discriminator().to(device)
+        optim_disc_emb = optim_class(disc_emb.parameters(), lr=args.lr, betas=args.betas)
+        if args.lr_decay is not None:
+            scheduler_disc_emb = torch.optim.lr_scheduler.ExponentialLR(
+                optim_disc_emb, gamma=args.lr_decay, last_epoch=-1)
+
+        disc_emb_params = sum(p.numel() for p in disc_emb.parameters())
+        logger.info(f"Embedding MetricGAN enabled: {disc_emb_params / 1_000_000:.2f} M params")
+
     # Solver
     solver = Solver(
         data=dataloader,
@@ -273,6 +307,10 @@ def run(args):
         discriminator=discriminator,
         optim_disc=optim_disc,
         scheduler_disc=scheduler_disc,
+        disc_emb=disc_emb,
+        optim_disc_emb=optim_disc_emb,
+        scheduler_disc_emb=scheduler_disc_emb,
+        emb_extractor=emb_extractor,
     )
     solver.train()
     sys.exit(0)

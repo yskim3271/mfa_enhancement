@@ -29,6 +29,7 @@ loss:
   consistency: 0.05
   embedding: 0.02
   metric: 0.05
+  metric_emb: 0.02
 
 embedding_loss:
   enabled: true
@@ -41,6 +42,11 @@ embedding_loss:
 
 metricgan:
   enabled: true
+
+embedding_metricgan:
+  enabled: true
+  model_name: "Cnam-LMSSC/wav2vec2-french-phonemizer"
+  layer: 5
 
 # Optimization related
 lr: 5e-4
