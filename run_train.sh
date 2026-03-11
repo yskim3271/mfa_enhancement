@@ -12,9 +12,6 @@
 #   # Pod 유지
 #   ./run_train.sh --keep-pod --fold 5 fold5_dpcrn
 #
-#   # Hydra override 추가
-#   ./run_train.sh --fold 5 fold5_no_emb embedding_loss.enabled=false
-#
 # Prerequisites:
 #   - runpodctl 설치 및 인증 완료
 #   - "enh-train" 이름의 RUNNING pod 존재 (create_pods.sh로 생성 및 셋업 완료)

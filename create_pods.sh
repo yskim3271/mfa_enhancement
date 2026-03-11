@@ -165,7 +165,7 @@ fi
 echo "[2/3] Setting up repository..."
 if [[ -d "$REMOTE_PROJECT/.git" ]]; then
     echo "  Repository exists, pulling latest..."
-    cd "$REMOTE_PROJECT" && git pull --ff-only
+    cd "$REMOTE_PROJECT" && git fetch origin && git reset --hard origin/master
 else
     echo "  Cloning repository..."
     cd /workspace && git clone "$REPO_URL"
@@ -215,7 +215,7 @@ create_pod() {
             --containerDiskSize 20 \
             --ports "22/tcp" \
             --startSSH \
-            --secureCloud 2>&1)
+            --secureCloud 2>&1) || true
 
         if echo "$RESULT" | grep -qi "error"; then
             log "$name: 생성 실패 - 60초 후 재시도"

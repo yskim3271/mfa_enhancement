@@ -1,3 +1,6 @@
+import json
+import os
+
 import torch
 import numpy as np
 import logging
@@ -68,42 +71,71 @@ def evaluate(
 
 
 def run_standalone_evaluation(args):
-    """Standalone evaluation entry point."""
+    """Standalone evaluation entry point.
+
+    Usage:
+        # Fold-based evaluation (K-fold test set)
+        python -m enhancement.src.evaluate --fold_dir results/experiments/emb_pdetach_w002
+
+        # Legacy evaluation (HuggingFace fixed test split)
+        python -m enhancement.src.evaluate --model_config path/to/config.yaml --chkpt_dir path/to/dir
+    """
     from .data import VibravoxDataset
+    from .generate import load_best_model, get_test_dataset
     from .utils import load_model, load_checkpoint, get_stft_args_from_config
     from omegaconf import OmegaConf
-    from datasets import load_dataset
 
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.FileHandler(args.log_file),
-            logging.StreamHandler()
-        ]
+        handlers=[logging.StreamHandler()],
     )
     logger = logging.getLogger(__name__)
 
-    conf = OmegaConf.load(args.model_config)
-    conf.device = args.device
+    if args.fold_dir:
+        # --- Fold-based mode ---
+        fold_dir = args.fold_dir
+        exp_name = os.path.basename(fold_dir.rstrip("/"))
+        device = torch.device(args.device if torch.cuda.is_available() else "cpu")
 
-    model_args = conf.model
-    model_lib = model_args.model_lib
-    model_class_name = model_args.model_class
+        logger.info(f"[{exp_name}] Loading model from {fold_dir}")
+        model, config, stft_args = load_best_model(fold_dir, device)
+        config.device = str(device)
 
-    model = load_model(model_lib, model_class_name, model_args.param, args.device)
-    model = load_checkpoint(model, args.chkpt_dir, args.chkpt_file, args.device)
+        testset, _ = get_test_dataset(config)
 
-    # Load Vibravox test set
-    testset = load_dataset("yskim3271/vibravox_16k", split="test")
-    stft_args = get_stft_args_from_config(model_args)
+        ev_dataset = VibravoxDataset(
+            datapair_list=testset,
+            sampling_rate=16000,
+            with_id=True,
+            with_text=True,
+        )
+    else:
+        # --- Legacy mode ---
+        from datasets import load_dataset
 
-    ev_dataset = VibravoxDataset(
-        datapair_list=testset,
-        sampling_rate=16000,
-        with_id=True,
-        with_text=True,
-    )
+        device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+        exp_name = os.path.basename(args.chkpt_dir.rstrip("/"))
+
+        config = OmegaConf.load(args.model_config)
+        config.device = str(device)
+        model_args = config.model
+
+        model = load_model(
+            model_args.model_lib, model_args.model_class,
+            model_args.param, str(device),
+        )
+        model = load_checkpoint(model, args.chkpt_dir, args.chkpt_file, str(device))
+        stft_args = get_stft_args_from_config(model_args)
+
+        testset = load_dataset("yskim3271/vibravox_16k", split="test")
+        ev_dataset = VibravoxDataset(
+            datapair_list=testset,
+            sampling_rate=16000,
+            with_id=True,
+            with_text=True,
+        )
+
     ev_loader = DataLoader(
         dataset=ev_dataset,
         batch_size=1,
@@ -111,12 +143,10 @@ def run_standalone_evaluation(args):
         pin_memory=True,
     )
 
-    logger.info(f"Model: {model_class_name}")
-    logger.info(f"Checkpoint: {args.chkpt_dir}")
-    logger.info(f"Device: {args.device}")
+    logger.info(f"[{exp_name}] Test set: {len(ev_dataset)} utterances, device: {device}")
 
-    evaluate(
-        args=conf,
+    metrics = evaluate(
+        args=config,
         model=model,
         data_loader=ev_loader,
         logger=logger,
@@ -124,17 +154,35 @@ def run_standalone_evaluation(args):
         stft_args=stft_args,
     )
 
+    # Save results
+    out_path = args.output or os.path.join(args.fold_dir or args.chkpt_dir, "eval_metrics.json")
+    with open(out_path, "w") as f:
+        json.dump({"experiment": exp_name, "num_samples": len(ev_dataset), **metrics}, f, indent=2)
+    logger.info(f"[{exp_name}] Metrics saved to {out_path}")
+
 
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--model_config", type=str, required=True, help="Path to the model config file.")
-    parser.add_argument("--chkpt_dir", type=str, default='.', help="Path to the checkpoint directory.")
-    parser.add_argument("--chkpt_file", type=str, default="best.th", help="Checkpoint file name.")
-    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    parser = argparse.ArgumentParser(description="Evaluate enhancement model")
+    # Fold-based mode
+    parser.add_argument("--fold_dir", type=str, default=None,
+                        help="Path to fold experiment directory (e.g. results/experiments/emb_pdetach_w002)")
+    # Legacy mode
+    parser.add_argument("--model_config", type=str, default=None,
+                        help="Path to the model config file (legacy mode)")
+    parser.add_argument("--chkpt_dir", type=str, default=".",
+                        help="Path to the checkpoint directory (legacy mode)")
+    parser.add_argument("--chkpt_file", type=str, default="best.th")
+    # Common
+    parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--num_workers", type=int, default=5)
-    parser.add_argument("--log_file", type=str, default="output.log")
+    parser.add_argument("--output", type=str, default=None,
+                        help="Output JSON path (default: {fold_dir}/eval_metrics.json)")
 
     args = parser.parse_args()
+
+    if not args.fold_dir and not args.model_config:
+        parser.error("Either --fold_dir or --model_config is required")
+
     run_standalone_evaluation(args)

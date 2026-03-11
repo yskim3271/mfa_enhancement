@@ -10,6 +10,14 @@ from .stft import mag_pha_istft, mag_pha_stft
 from .utils import copy_state, swap_state, phase_losses, LogProgress, pull_metric, get_stft_args, batch_pesq
 
 
+def _masked_mse(pred, target, mask):
+    """MSE loss with optional boolean mask. Falls back to unmasked if mask is None."""
+    if mask is not None:
+        assert pred.shape == mask.shape, f"shape mismatch: pred {pred.shape} vs mask {mask.shape}"
+        return F.mse_loss(pred[mask], target[mask])
+    return F.mse_loss(pred, target)
+
+
 class Solver(object):
     def __init__(
         self,
@@ -20,7 +28,6 @@ class Solver(object):
         args,
         logger,
         device=None,
-        embedding_loss=None,
         discriminator=None,
         optim_disc=None,
         scheduler_disc=None,
@@ -51,8 +58,6 @@ class Solver(object):
 
         # loss weights
         self.loss = args.loss
-        self.embedding_loss = embedding_loss
-        self.phase_detach = args.get("embedding_loss", {}).get("phase_detach", False)
 
         # logger
         self.logger = logger
@@ -335,6 +340,7 @@ class Solver(object):
             # --- Embedding MetricGAN: Discriminator training ---
             loss_disc_emb_scalar = 0.0
             n_frames = None
+            silence_mask = None
             if self.disc_emb is not None:
                 self.disc_emb.train()
 
@@ -346,6 +352,11 @@ class Solver(object):
                 q_enhanced = self.emb_extractor.compute_frame_quality(
                     acoustic_dev, est_audio.detach(), z_ac=z_ac)
                 n_frames = q_throat.shape[1]
+                silence_mask = self.emb_extractor.compute_silence_mask(
+                    acoustic_dev, n_frames)
+                # Pre-resolve mask.any() once to avoid repeated GPU syncs
+                if silence_mask is not None and not silence_mask.any():
+                    silence_mask = None
 
                 self.optim_disc_emb.zero_grad()
 
@@ -360,9 +371,9 @@ class Solver(object):
                     n_frames=n_frames)
 
                 loss_disc_emb = (
-                    F.mse_loss(metric_emb_r, torch.ones_like(q_throat)) +
-                    F.mse_loss(metric_emb_th, q_throat) +
-                    F.mse_loss(metric_emb_g, q_enhanced))
+                    _masked_mse(metric_emb_r, torch.ones_like(q_throat), silence_mask) +
+                    _masked_mse(metric_emb_th, q_throat, silence_mask) +
+                    _masked_mse(metric_emb_g, q_enhanced, silence_mask))
 
                 loss_disc_emb.backward()
                 torch.nn.utils.clip_grad_norm_(
@@ -376,20 +387,10 @@ class Solver(object):
             loss_complex = F.mse_loss(target_com, est_com) * 2
             loss_consistency = F.mse_loss(est_com, est_com_con) * 2
 
-            if self.embedding_loss is not None:
-                if self.phase_detach:
-                    est_audio_emb = mag_pha_istft(est_mag, est_pha.detach(), **self.stft_args)
-                    loss_embedding = self.embedding_loss(est_audio_emb, acoustic.to(self.device))
-                else:
-                    loss_embedding = self.embedding_loss(est_audio, acoustic.to(self.device))
-            else:
-                loss_embedding = torch.tensor(0.0, device=self.device)
-
             loss = loss_complex * self.loss.complex + \
                    loss_consistency * self.loss.consistency + \
                    loss_magnitude * self.loss.magnitude + \
-                   loss_phase * self.loss.phase + \
-                   loss_embedding * self.loss.get("embedding", 0.0)
+                   loss_phase * self.loss.phase
 
             # MetricGAN: generator adversarial loss
             loss_metric = torch.tensor(0.0, device=self.device)
@@ -405,7 +406,8 @@ class Solver(object):
                 metric_emb_g = self.disc_emb(
                     target_mag.unsqueeze(1), est_mag_con.unsqueeze(1),
                     n_frames=n_frames)
-                loss_metric_emb = F.mse_loss(metric_emb_g, torch.ones_like(metric_emb_g))
+                loss_metric_emb = _masked_mse(
+                    metric_emb_g, torch.ones_like(metric_emb_g), silence_mask)
                 loss = loss + loss_metric_emb * self.loss.get("metric_emb", 0.0)
 
             loss_dict = {
@@ -413,7 +415,6 @@ class Solver(object):
                 "Phase_Loss": loss_phase,
                 "Complex_Loss": loss_complex,
                 "Consistency_Loss": loss_consistency,
-                "Embedding_Loss": loss_embedding,
                 "Metric_Loss": loss_metric,
                 "EmbMetric_Loss": loss_metric_emb,
                 "Disc_Loss": loss_disc_scalar,

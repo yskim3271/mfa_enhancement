@@ -242,24 +242,6 @@ def run(args):
         "ev_loader": ev_loader,
     }
 
-    # Embedding loss
-    embedding_loss = None
-    emb_cfg = args.get("embedding_loss", {})
-    if emb_cfg.get("enabled", False):
-        from .embedding_loss import EmbeddingLoss
-        embedding_loss = EmbeddingLoss(
-            model_name=emb_cfg.model_name,
-            layer=emb_cfg.layer,
-            risk_calibrated=emb_cfg.get("risk_calibrated", False),
-            risk_beta=tuple(emb_cfg.get("risk_beta", [-4.85, 6.72])),
-            local_window=emb_cfg.get("local_window", 0),
-        ).to(device)
-        logger.info(f"EmbeddingLoss enabled: model={emb_cfg.model_name}, layer={emb_cfg.layer}")
-        if emb_cfg.get("risk_calibrated", False):
-            logger.info(f"  Risk-calibrated loss: beta={list(emb_cfg.risk_beta)}")
-        if emb_cfg.get("local_window", 0) > 0:
-            logger.info(f"  Local-window alignment: K={emb_cfg.local_window}")
-
     # Embedding MetricGAN (optional)
     disc_emb = None
     optim_disc_emb = None
@@ -271,18 +253,13 @@ def run(args):
         from .embedding_extractor import EmbeddingQualityExtractor
         from .models.discriminator import FrameLevelEmbeddingCritic
 
-        # Reuse wav2vec2 from EmbeddingLoss if model/layer match
-        shared_model = None
-        if embedding_loss is not None:
-            if (emb_cfg.model_name == emb_metricgan_cfg.model_name
-                    and emb_cfg.layer == emb_metricgan_cfg.layer):
-                shared_model = embedding_loss.model
-            else:
-                logger.info("EmbeddingLoss and EmbeddingMetricGAN use different model/layer; loading separate model")
+        silence_cfg = emb_metricgan_cfg.get("silence_mask", {})
+        silence_db = silence_cfg.get("silence_db") if silence_cfg.get("enabled", False) else None
+
         emb_extractor = EmbeddingQualityExtractor(
             model_name=emb_metricgan_cfg.model_name,
-            layer=emb_metricgan_cfg.layer,
-            shared_model=shared_model,
+            layers=list(emb_metricgan_cfg.layers),
+            silence_db=silence_db,
         ).to(device)
 
         disc_emb = FrameLevelEmbeddingCritic(ndf=16).to(device)
@@ -303,7 +280,6 @@ def run(args):
         args=args,
         logger=logger,
         device=device,
-        embedding_loss=embedding_loss,
         discriminator=discriminator,
         optim_disc=optim_disc,
         scheduler_disc=scheduler_disc,
