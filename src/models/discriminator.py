@@ -87,9 +87,9 @@ class FrameLevelEmbeddingCritic(nn.Module):
                 nn.Conv2d(ndf * 4, ndf * 4, (8, 3), (4, 1), (2, 1), bias=False)),
             nn.InstanceNorm2d(ndf * 4, affine=True),
             nn.PReLU(ndf * 4),
-            # Block 5: F:4→1, C:4ndf→4ndf  (k=8,s=4)
+            # Block 5: F:→1, C:4ndf→4ndf  (k=4,s=4)
             nn.utils.spectral_norm(
-                nn.Conv2d(ndf * 4, ndf * 4, (8, 3), (4, 1), (2, 1), bias=False)),
+                nn.Conv2d(ndf * 4, ndf * 4, (4, 3), (4, 1), (1, 1), bias=False)),
             nn.InstanceNorm2d(ndf * 4, affine=True),
             nn.PReLU(ndf * 4),
         )
