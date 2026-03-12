@@ -116,6 +116,12 @@ class FrameLevelEmbeddingCritic(nn.Module):
             nn.PReLU(ndf * 8),
         )
 
+        # Simplified Channel Attention (SCA): recalibrate encoder channels
+        self.sca = nn.Sequential(
+            nn.AdaptiveAvgPool1d(1),
+            nn.Conv1d(ndf * 8, ndf * 8, kernel_size=1),
+        )
+
         # Dilated 1D temporal head with residual connections
         self.temporal = nn.Sequential(
             DilatedResBlock1d(ndf * 8, ndf * 4, [1, 2]),
@@ -138,6 +144,7 @@ class FrameLevelEmbeddingCritic(nn.Module):
         h = self.encoder(xy)                        # [B, 8*ndf, 1, T_disc]
         assert h.shape[2] == 1, f"Expected freq=1 after encoder, got {h.shape[2]}"
         h = h.squeeze(2)                            # [B, 8*ndf, T_disc]
+        h = h * self.sca(h)                         # SCA: channel attention
         h = self.temporal(h).squeeze(1)             # [B, T_disc]
         if n_frames is not None:
             h = nn.functional.adaptive_avg_pool1d(
