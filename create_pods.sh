@@ -2,19 +2,17 @@
 # GPU 가용성 모니터링 후 자동 Pod 생성 + SSH 대기 + 환경 셋업
 #
 # Usage:
-#   bash create_pods.sh <pod-name> [options]
+#   bash create_pods.sh <pod-name> [pod-name2 ...] [options]
 #
 # Options:
 #   --gpu <type>      GPU 종류 (기본: "NVIDIA GeForce RTX 5090")
-#   --count <N>       생성할 Pod 수 (기본: 1)
-#                     N>1이면 이름 뒤에 -1, -2, ... 접미사 자동 부여
 #   --no-setup        Pod 생성만 하고 셋업은 스킵
 #
 # Examples:
 #   bash create_pods.sh enh-train
-#   bash create_pods.sh enh-train --count 3
-#   bash create_pods.sh enh-train --gpu "NVIDIA GeForce RTX 4090" --count 2
-#   bash create_pods.sh enh-train --count 3 --no-setup
+#   bash create_pods.sh mfa-train-3 mfa-train-4
+#   bash create_pods.sh enh-train-1 enh-train-2 --gpu "NVIDIA GeForce RTX 4090"
+#   bash create_pods.sh mfa-train-3 mfa-train-4 --no-setup
 #
 # Known issues (RTX 5090 + PyTorch 2.8 + Ubuntu 24.04):
 #   - pip install --break-system-packages 필수 (PEP 668)
@@ -30,34 +28,26 @@ NETWORK_VOLUME_ID="8mdudh5imp"
 
 # ---- Parse arguments ----
 if [[ $# -lt 1 ]] || [[ "$1" == -* ]]; then
-    echo "Usage: $0 <pod-name> [--gpu <type>] [--count <N>] [--no-setup]"
+    echo "Usage: $0 <pod-name> [pod-name2 ...] [--gpu <type>] [--no-setup]"
     exit 1
 fi
 
-BASE_NAME="$1"
-shift
-
 GPU_TYPE="NVIDIA GeForce RTX 5090"
-POD_COUNT=1
 RUN_SETUP=true
+POD_NAMES=()
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         --gpu) GPU_TYPE="$2"; shift 2 ;;
-        --count) POD_COUNT="$2"; shift 2 ;;
         --no-setup) RUN_SETUP=false; shift ;;
-        *) echo "Unknown option: $1"; exit 1 ;;
+        -*) echo "Unknown option: $1"; exit 1 ;;
+        *) POD_NAMES+=("$1"); shift ;;
     esac
 done
 
-# ---- Build pod name list ----
-POD_NAMES=()
-if [[ "$POD_COUNT" -eq 1 ]]; then
-    POD_NAMES+=("$BASE_NAME")
-else
-    for i in $(seq 1 "$POD_COUNT"); do
-        POD_NAMES+=("${BASE_NAME}-${i}")
-    done
+if [[ ${#POD_NAMES[@]} -eq 0 ]]; then
+    echo "Error: Pod 이름을 최소 1개 지정해야 합니다."
+    exit 1
 fi
 
 echo "=== Pod Create & Setup ==="
