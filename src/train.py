@@ -253,13 +253,9 @@ def run(args):
         from .embedding_extractor import EmbeddingQualityExtractor
         from .models.discriminator import FrameLevelEmbeddingCritic
 
-        silence_cfg = emb_metricgan_cfg.get("silence_mask", {})
-        silence_db = silence_cfg.get("silence_db") if silence_cfg.get("enabled", False) else None
-
         emb_extractor = EmbeddingQualityExtractor(
             model_name=emb_metricgan_cfg.model_name,
             layers=list(emb_metricgan_cfg.layers),
-            silence_db=silence_db,
         ).to(device)
 
         disc_emb = FrameLevelEmbeddingCritic(ndf=16).to(device)

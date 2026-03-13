@@ -7,9 +7,6 @@ from transformers import Wav2Vec2Model
 
 logger = logging.getLogger(__name__)
 
-# wav2vec2 CNN feature extractor total stride: 5*2*2*2*2*2*2 = 320 samples
-WAV2VEC2_STRIDE = 320
-
 
 class EmbeddingQualityExtractor(nn.Module):
     """Frozen wav2vec2 extractor for computing embedding quality scores.
@@ -21,11 +18,9 @@ class EmbeddingQualityExtractor(nn.Module):
     and averages across layers for the final quality score.
     """
 
-    def __init__(self, model_name: str, layers: list[int],
-                 silence_db: float | None = None):
+    def __init__(self, model_name: str, layers: list[int]):
         super().__init__()
         self.layers = sorted(layers)
-        self.silence_db = silence_db
         max_layer = max(self.layers)
 
         model = Wav2Vec2Model.from_pretrained(
@@ -37,8 +32,6 @@ class EmbeddingQualityExtractor(nn.Module):
         self.model = model
         self.model.eval()
         logger.info(f"EmbeddingQualityExtractor: loaded wav2vec2 (layers={self.layers})")
-        if silence_db is not None:
-            logger.info(f"  silence mask enabled (silence_db={silence_db})")
 
     def train(self, mode=True):
         super().train(mode)
@@ -65,40 +58,6 @@ class EmbeddingQualityExtractor(nn.Module):
     def extract_embeddings(self, waveform):
         """Extract frame embeddings (no_grad). Use to cache acoustic embeddings."""
         return self._extract(waveform)
-
-    @torch.no_grad()
-    def compute_silence_mask(self, acoustic, n_frames):
-        """Create binary mask excluding silence frames based on acoustic energy.
-
-        Uses relative dB: frames below (max_energy + silence_db) are silence.
-
-        Args:
-            acoustic: [B, T_samples] reference waveform
-            n_frames: number of wav2vec2 frames to align to
-
-        Returns:
-            [B, n_frames] bool tensor (True = speech), or None if disabled.
-        """
-        if self.silence_db is None:
-            return None
-
-        # Reshape into non-overlapping windows (stride == window size)
-        n_complete = (acoustic.shape[-1] // WAV2VEC2_STRIDE) * WAV2VEC2_STRIDE
-        energy = acoustic[..., :n_complete].reshape(acoustic.shape[0], -1, WAV2VEC2_STRIDE)
-        energy = energy.pow(2).mean(dim=-1)  # [B, n_local_frames]
-        energy = energy[:, :n_frames]
-
-        # Pad if wav2vec2 produces more frames than simple striding
-        if energy.shape[-1] < n_frames:
-            pad = torch.zeros(
-                energy.shape[0], n_frames - energy.shape[-1],
-                device=energy.device,
-            )
-            energy = torch.cat([energy, pad], dim=-1)
-
-        max_energy = energy.max(dim=-1, keepdim=True).values.clamp(min=1e-10)
-        energy_db = 10 * torch.log10(energy.clamp(min=1e-10) / max_energy)
-        return energy_db > self.silence_db
 
     @torch.no_grad()
     def compute_frame_quality(self, acoustic, pair, z_ac=None):

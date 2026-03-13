@@ -37,9 +37,6 @@ embedding_metricgan:
   enabled: true
   model_name: "Cnam-LMSSC/wav2vec2-french-phonemizer"
   layers: [5]
-  silence_mask:
-    enabled: true
-    silence_db: -30
 
 # Optimization related
 lr: 5e-4
