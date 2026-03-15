@@ -35,8 +35,8 @@ metricgan:
 
 embedding_metricgan:
   enabled: true
-  model_name: "Cnam-LMSSC/wav2vec2-french-phonemizer"
-  layers: [5]
+  model_name: "bofenghuang/asr-wav2vec2-ctc-french"
+  layers: [6]
 
 # Optimization related
 lr: 5e-4
