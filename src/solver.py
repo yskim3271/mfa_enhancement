@@ -279,9 +279,6 @@ class Solver(object):
             throat, acoustic = data
             throat_mag, _, input_com = mag_pha_stft(throat, **self.stft_args)
             input_com = input_com.to(self.device)
-            if self.disc_emb is not None:
-                throat_mag = throat_mag.to(self.device)
-
             target_mag, target_pha, target_com = mag_pha_stft(acoustic, **self.stft_args)
             target_mag = target_mag.to(self.device)
             target_pha = target_pha.to(self.device)
@@ -335,30 +332,24 @@ class Solver(object):
             if self.disc_emb is not None:
                 self.disc_emb.train()
 
-                # Teacher targets: extract acoustic once, reuse for both pairs
+                # Teacher target: enhanced quality only (no throat anchor)
                 acoustic_dev = acoustic.to(self.device)
                 z_ac = self.emb_extractor.extract_embeddings(acoustic_dev)
-                q_throat = self.emb_extractor.compute_frame_quality(
-                    acoustic_dev, throat.to(self.device), z_ac=z_ac)
                 q_enhanced = self.emb_extractor.compute_frame_quality(
                     acoustic_dev, est_audio.detach(), z_ac=z_ac)
-                n_frames = q_throat.shape[1]
+                n_frames = q_enhanced.shape[1]
 
                 self.optim_disc_emb.zero_grad()
 
                 metric_emb_r = self.disc_emb(
                     target_mag.unsqueeze(1), target_mag.unsqueeze(1),
                     n_frames=n_frames)
-                metric_emb_th = self.disc_emb(
-                    target_mag.unsqueeze(1), throat_mag.unsqueeze(1),
-                    n_frames=n_frames)
                 metric_emb_g = self.disc_emb(
                     target_mag.unsqueeze(1), est_mag_con.detach().unsqueeze(1),
                     n_frames=n_frames)
 
                 loss_disc_emb = (
-                    F.mse_loss(metric_emb_r, torch.ones_like(q_throat)) +
-                    F.mse_loss(metric_emb_th, q_throat) +
+                    F.mse_loss(metric_emb_r, torch.ones_like(q_enhanced)) +
                     F.mse_loss(metric_emb_g, q_enhanced))
 
                 loss_disc_emb.backward()
