@@ -1,5 +1,6 @@
 defaults:
   - _self_
+  - model: dpcrn
   - cv: default
   - override hydra/job_logging: colorlog
   - override hydra/hydra_logging: colorlog
@@ -35,8 +36,8 @@ metricgan:
 
 embedding_metricgan:
   enabled: true
-  model_name: "bofenghuang/asr-wav2vec2-ctc-french"
-  layers: [6]
+  model_name: "Cnam-LMSSC/wav2vec2-french-phonemizer"
+  layers: [5]
 
 # Optimization related
 lr: 5e-4
