@@ -118,7 +118,7 @@ log "SSH: $SSH_HOST port $SSH_PORT"
 
 # 2. Build training command
 HYDRA_DIR="./results/experiments/${EXP_NAME}"
-TRAIN_CMD="cd $REMOTE_PROJECT && python3 -m src.train +model=dpcrn hydra.run.dir=$HYDRA_DIR"
+TRAIN_CMD="cd $REMOTE_PROJECT && python3 -m src.train hydra.run.dir=$HYDRA_DIR"
 
 if [[ -n "$FOLD_INDEX" ]]; then
     TRAIN_CMD="$TRAIN_CMD cv.enabled=true cv.fold_index=$FOLD_INDEX"

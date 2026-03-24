@@ -41,10 +41,17 @@ embedding_metricgan:
 
 # Optimization related
 lr: 5e-4
-lr_decay: 0.99
+weight_decay: 0.01
 optim: adamW
-betas: [0.8, 0.99]
+betas: [0.9, 0.99]
 max_grad_norm: 5.0  # Gradient clipping threshold
+
+# LR scheduler
+scheduler:
+  type: cosine        # cosine | exponential
+  warmup_epochs: 10
+  min_lr: 0
+  gamma: 0.99         # exponential only
 
 # Logging and printing
 device: cuda

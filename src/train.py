@@ -1,5 +1,6 @@
 import os
 import sys
+import math
 import logging
 import hydra
 import random
@@ -15,6 +16,47 @@ from .solver import Solver
 from .utils import load_model
 
 torch.backends.cudnn.benchmark = True
+
+
+def create_scheduler(optimizer, args):
+    """Create LR scheduler from config.
+
+    Supports:
+      - scheduler.type=cosine : CosineAnnealing with linear warmup
+      - scheduler.type=exponential : ExponentialLR (per-epoch gamma decay)
+      - (legacy) lr_decay=0.99 : falls back to ExponentialLR
+    """
+    sched_cfg = args.get("scheduler", None)
+
+    # Legacy fallback: lr_decay without scheduler section
+    if sched_cfg is None:
+        lr_decay = getattr(args, "lr_decay", None)
+        if lr_decay is not None:
+            return torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=lr_decay)
+        return None
+
+    sched_type = sched_cfg.get("type", "cosine")
+    total_epochs = args.epochs
+
+    if sched_type == "exponential":
+        gamma = sched_cfg.get("gamma", 0.99)
+        return torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=gamma)
+
+    if sched_type == "cosine":
+        warmup_epochs = sched_cfg.get("warmup_epochs", 0)
+        min_lr = sched_cfg.get("min_lr", 0)
+        peak_lr = optimizer.param_groups[0]["lr"]
+
+        def lr_lambda(epoch):
+            if warmup_epochs > 0 and epoch < warmup_epochs:
+                return (epoch + 1) / warmup_epochs
+            progress = (epoch - warmup_epochs) / max(total_epochs - warmup_epochs, 1)
+            cosine_val = 0.5 * (1 + math.cos(math.pi * progress))
+            return min_lr / peak_lr + (1 - min_lr / peak_lr) * cosine_val
+
+        return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+    raise ValueError(f"Unknown scheduler type: {sched_type}")
 
 
 def create_kfold_splits(dataset, fold_index, num_folds=5, seed=2039):
@@ -144,7 +186,8 @@ def run(args):
     elif args.optim in ("adamW", "adamw"):
         optim_class = torch.optim.AdamW
 
-    optim = optim_class(model.parameters(), lr=args.lr, betas=args.betas)
+    wd = getattr(args, "weight_decay", 0.01)
+    optim = optim_class(model.parameters(), lr=args.lr, betas=args.betas, weight_decay=wd)
 
     # MetricGAN discriminator (optional)
     discriminator = None
@@ -155,16 +198,14 @@ def run(args):
     if metricgan_cfg.get("enabled", False):
         from .models.discriminator import MetricGAN_Discriminator
         discriminator = MetricGAN_Discriminator().to(device)
-        optim_disc = optim_class(discriminator.parameters(), lr=args.lr, betas=args.betas)
+        optim_disc = optim_class(discriminator.parameters(), lr=args.lr, betas=args.betas, weight_decay=wd)
         disc_params = sum(p.numel() for p in discriminator.parameters())
         logger.info(f"MetricGAN discriminator enabled: {disc_params / 1_000_000:.2f} M params")
 
     # Scheduler
-    scheduler = None
-    if args.lr_decay is not None:
-        scheduler = torch.optim.lr_scheduler.ExponentialLR(optim, gamma=args.lr_decay, last_epoch=-1)
-        if discriminator is not None:
-            scheduler_disc = torch.optim.lr_scheduler.ExponentialLR(optim_disc, gamma=args.lr_decay, last_epoch=-1)
+    scheduler = create_scheduler(optim, args)
+    if discriminator is not None:
+        scheduler_disc = create_scheduler(optim_disc, args)
 
     # Load Vibravox dataset
     logger.info(f"Loading dataset: {args.dataset}")
@@ -259,10 +300,8 @@ def run(args):
         ).to(device)
 
         disc_emb = FrameLevelEmbeddingCritic(ndf=16).to(device)
-        optim_disc_emb = optim_class(disc_emb.parameters(), lr=args.lr, betas=args.betas)
-        if args.lr_decay is not None:
-            scheduler_disc_emb = torch.optim.lr_scheduler.ExponentialLR(
-                optim_disc_emb, gamma=args.lr_decay, last_epoch=-1)
+        optim_disc_emb = optim_class(disc_emb.parameters(), lr=args.lr, betas=args.betas, weight_decay=wd)
+        scheduler_disc_emb = create_scheduler(optim_disc_emb, args)
 
         disc_emb_params = sum(p.numel() for p in disc_emb.parameters())
         logger.info(f"Embedding MetricGAN enabled: {disc_emb_params / 1_000_000:.2f} M params")
