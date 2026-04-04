@@ -29,29 +29,16 @@ loss:
   complex: 0.1
   consistency: 0.05
   metric: 0.05
-  metric_emb: 0.05
 
 metricgan:
   enabled: true
 
-embedding_metricgan:
-  enabled: true
-  model_name: "Cnam-LMSSC/wav2vec2-french-phonemizer"
-  layers: [5]
-
 # Optimization related
 lr: 5e-4
-weight_decay: 0.01
+lr_decay: 0.99
 optim: adamW
-betas: [0.9, 0.99]
+betas: [0.8, 0.99]
 max_grad_norm: 5.0  # Gradient clipping threshold
-
-# LR scheduler
-scheduler:
-  type: cosine        # cosine | exponential
-  warmup_epochs: 10
-  min_lr: 0
-  gamma: 0.99         # exponential only
 
 # Logging and printing
 device: cuda

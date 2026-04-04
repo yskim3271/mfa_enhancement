@@ -1,22 +1,15 @@
 """Generate enhanced waveforms from trained fold models.
 
 Usage (from project root):
-    # Full test set (speaker subdirs, metadata appended)
     python -m enhancement.src.generate \
         --fold_dir results/experiments/fold1 \
-        --output_dir data/source/vibravox_enhanced_baseline
-
-    # Random subset for inspection (flat directory)
-    python -m enhancement.src.generate \
-        --fold_dir results/experiments/fold1 \
-        --output_dir results/samples \
-        --num_samples 20 --seed 42
+        --output_dir data/source/vibravox_enhanced_baseline \
+        --device cuda
 """
 import os
 import json
 import logging
 import argparse
-import random
 
 import torch
 import soundfile as sf
@@ -65,11 +58,19 @@ def get_test_dataset(config):
     ])
 
     cv = config.cv
+
+    # Use gender-balanced groups for TAPS dataset
+    speaker_groups = None
+    if "Throat_and_Acoustic_Pairing_Speech_Dataset" in config.dataset:
+        from .train import _get_taps_speaker_groups
+        speaker_groups = _get_taps_speaker_groups()
+
     _, _, testset, fold_info = create_kfold_splits(
         dataset=all_data,
         fold_index=cv.fold_index,
         num_folds=cv.num_folds,
         seed=config.seed,
+        speaker_groups=speaker_groups,
     )
 
     logger.info(
@@ -79,30 +80,57 @@ def get_test_dataset(config):
     return testset, fold_info
 
 
-def enhance_single_item(model, item, stft_args, device):
-    """Run inference on a single dataset item, return enhanced numpy waveform."""
-    throat_np = item["audio.throat_microphone"]["array"].astype("float32")
-    throat_tensor = torch.from_numpy(throat_np).unsqueeze(0).to(device)
-    with torch.no_grad():
-        input_com = mag_pha_stft(throat_tensor, **stft_args)[2]
-        est_mag, est_pha, _ = model(input_com)
-        est_audio = mag_pha_istft(est_mag, est_pha, **stft_args)
-    return est_audio.squeeze(0)[:throat_np.shape[-1]].cpu().numpy()
+def generate(model, dataset, stft_args, output_dir, fold_index, model_path, device):
+    """Run inference and save enhanced waveforms + metadata."""
+    metadata = []
+    total = len(dataset)
+
+    for i in range(total):
+        item = dataset[i]
+        speaker_id = item["speaker_id"]
+        sentence_id = item["sentence_id"]
+
+        throat_np = item["audio.throat_microphone"]["array"].astype("float32")
+        throat_tensor = torch.tensor(throat_np).unsqueeze(0).to(device)
+
+        # Inference
+        with torch.no_grad():
+            input_com = mag_pha_stft(throat_tensor, **stft_args)[2]
+            est_mag, est_pha, _ = model(input_com)
+            est_audio = mag_pha_istft(est_mag, est_pha, **stft_args)
+
+        # Match length to original throat audio
+        orig_len = throat_np.shape[-1]
+        est_audio = est_audio.squeeze(0)[:orig_len].cpu().numpy()
+
+        # Save wav
+        speaker_dir = os.path.join(output_dir, speaker_id)
+        os.makedirs(speaker_dir, exist_ok=True)
+        filename = f"{speaker_id}_{sentence_id}_enhanced.wav"
+        wav_path = os.path.join(speaker_dir, filename)
+        sf.write(wav_path, est_audio, 16000)
+
+        metadata.append({
+            "audio_path": f"{speaker_id}/{filename}",
+            "speaker_id": speaker_id,
+            "sentence_id": sentence_id,
+            "fold": fold_index,
+            "model_path": model_path,
+            "condition": "baseline",
+        })
+
+        if (i + 1) % 500 == 0 or (i + 1) == total:
+            logger.info(f"  [{i + 1}/{total}] saved {filename}")
+
+    return metadata
 
 
 def main():
     parser = argparse.ArgumentParser(description="Generate enhanced waveforms")
     parser.add_argument("--fold_dir", type=str, required=True,
-                        help="Path to fold experiment directory")
-    parser.add_argument("--output_dir", type=str,
-                        default="data/source/vibravox_enhanced_baseline",
+                        help="Path to fold experiment directory (e.g. results/experiments/fold1)")
+    parser.add_argument("--output_dir", type=str, default="data/source/vibravox_enhanced_baseline",
                         help="Output directory for enhanced waveforms")
-    parser.add_argument("--num_samples", type=int, default=0,
-                        help="Number of random samples (0 = all)")
-    parser.add_argument("--seed", type=int, default=42,
-                        help="Random seed for sample selection")
-    parser.add_argument("--flat", action="store_true",
-                        help="Flat output (no speaker subdirs). Auto-enabled when --num_samples > 0")
     parser.add_argument("--device", type=str, default="cuda")
     args = parser.parse_args()
 
@@ -117,70 +145,23 @@ def main():
     model_path = os.path.join(fold_dir, "best.th")
 
     # Get test set
-    testset, _ = get_test_dataset(config)
-    total = len(testset)
-
-    # Select indices
-    if args.num_samples > 0:
-        rng = random.Random(args.seed)
-        indices = sorted(rng.sample(range(total), min(args.num_samples, total)))
-        flat = True  # auto-enable flat for sample mode
-    else:
-        indices = list(range(total))
-        flat = args.flat
-
-    # Output directory: append exp_name in sample mode
-    output_dir = args.output_dir
-    if args.num_samples > 0:
-        exp_name = os.path.basename(fold_dir.rstrip("/"))
-        output_dir = os.path.join(output_dir, exp_name)
-    os.makedirs(output_dir, exist_ok=True)
-
-    logger.info(f"Generating {len(indices)}/{total} utterances → {output_dir}")
+    testset, fold_info = get_test_dataset(config)
 
     # Generate
-    metadata = []
-    for rank, idx in enumerate(indices):
-        item = testset[idx]
-        speaker_id = item["speaker_id"]
-        sentence_id = item["sentence_id"]
+    logger.info(f"Generating enhanced waveforms → {args.output_dir}")
+    metadata = generate(
+        model, testset, stft_args, args.output_dir,
+        fold_index, model_path, device,
+    )
 
-        est_audio = enhance_single_item(model, item, stft_args, device)
-
-        filename = f"{speaker_id}_{sentence_id}_enhanced.wav"
-        if flat:
-            wav_path = os.path.join(output_dir, filename)
-            audio_path = filename
-        else:
-            speaker_dir = os.path.join(output_dir, speaker_id)
-            os.makedirs(speaker_dir, exist_ok=True)
-            wav_path = os.path.join(speaker_dir, filename)
-            audio_path = f"{speaker_id}/{filename}"
-        sf.write(wav_path, est_audio, 16000)
-
-        metadata.append({
-            "audio_path": audio_path,
-            "speaker_id": speaker_id,
-            "sentence_id": sentence_id,
-            "test_index": idx,
-            "fold": fold_index,
-            "model_path": model_path,
-        })
-
-        # Progress logging: every item in sample mode, every 500 in full mode
-        if args.num_samples > 0:
-            logger.info(f"  [{rank + 1}/{len(indices)}] {filename}")
-        elif (rank + 1) % 500 == 0 or (rank + 1) == len(indices):
-            logger.info(f"  [{rank + 1}/{len(indices)}] saved {filename}")
-
-    # Save metadata (append for full mode, overwrite for sample mode)
-    meta_path = os.path.join(output_dir, "metadata.jsonl")
-    mode = "w" if args.num_samples > 0 else "a"
-    with open(meta_path, mode) as f:
+    # Append to metadata.jsonl (safe for multiple folds)
+    meta_path = os.path.join(args.output_dir, "metadata.jsonl")
+    os.makedirs(args.output_dir, exist_ok=True)
+    with open(meta_path, "a") as f:
         for entry in metadata:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
-    logger.info(f"Done: {len(metadata)} utterances, metadata → {meta_path}")
+    logger.info(f"Done: {len(metadata)} utterances, metadata appended to {meta_path}")
 
 
 if __name__ == "__main__":

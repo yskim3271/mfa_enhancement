@@ -23,10 +23,6 @@ class Solver(object):
         discriminator=None,
         optim_disc=None,
         scheduler_disc=None,
-        disc_emb=None,
-        optim_disc_emb=None,
-        scheduler_disc_emb=None,
-        emb_extractor=None,
     ):
         # Dataloaders
         self.tr_loader = data['tr_loader']
@@ -42,12 +38,6 @@ class Solver(object):
         self.optim_disc = optim_disc
         self.scheduler_disc = scheduler_disc
 
-        # Embedding MetricGAN (optional)
-        self.disc_emb = disc_emb
-        self.optim_disc_emb = optim_disc_emb
-        self.scheduler_disc_emb = scheduler_disc_emb
-        self.emb_extractor = emb_extractor
-
         # loss weights
         self.loss = args.loss
 
@@ -58,7 +48,6 @@ class Solver(object):
         self.stft_args = get_stft_args(args)
 
         # Basic config
-        self.max_grad_norm = getattr(args, 'max_grad_norm', 5.0)
         self.device = device or torch.device(args.device)
 
         self.epochs = args.epochs
@@ -88,12 +77,6 @@ class Solver(object):
             package['discriminator'] = copy_state(self.discriminator.state_dict())
             package['optimizer_disc'] = self.optim_disc.state_dict()
             package['scheduler_disc'] = self.scheduler_disc.state_dict() if self.scheduler_disc is not None else None
-        if self.disc_emb is not None:
-            package['disc_emb'] = copy_state(self.disc_emb.state_dict())
-            package['optimizer_disc_emb'] = self.optim_disc_emb.state_dict()
-            package['scheduler_disc_emb'] = (
-                self.scheduler_disc_emb.state_dict()
-                if self.scheduler_disc_emb is not None else None)
         package['args'] = self.args
         package['history'] = self.history
         package['best_pesq'] = self.best_pesq
@@ -147,17 +130,6 @@ class Solver(object):
                 if self.scheduler_disc is not None and scheduler_disc_state is not None:
                     self.scheduler_disc.load_state_dict(scheduler_disc_state)
 
-            if self.disc_emb is not None:
-                disc_emb_state = package.get('disc_emb', None)
-                if disc_emb_state is not None:
-                    self.disc_emb.load_state_dict(disc_emb_state)
-                optim_disc_emb_state = package.get('optimizer_disc_emb', None)
-                if optim_disc_emb_state is not None:
-                    self.optim_disc_emb.load_state_dict(optim_disc_emb_state)
-                scheduler_disc_emb_state = package.get('scheduler_disc_emb', None)
-                if self.scheduler_disc_emb is not None and scheduler_disc_emb_state is not None:
-                    self.scheduler_disc_emb.load_state_dict(scheduler_disc_emb_state)
-
             self.best_pesq = package.get('best_pesq', 0.0)
             self.best_state = package.get('best_state', None)
             self.history = package.get('history', [])
@@ -191,8 +163,6 @@ class Solver(object):
 
             if self.discriminator is not None:
                 self.discriminator.eval()
-            if self.disc_emb is not None:
-                self.disc_emb.eval()
 
             start = time.time()
             self.logger.info('-' * 70)
@@ -277,8 +247,8 @@ class Solver(object):
         for i, data in enumerate(logprog):
 
             throat, acoustic = data
-            throat_mag, _, input_com = mag_pha_stft(throat, **self.stft_args)
-            input_com = input_com.to(self.device)
+            input_com = mag_pha_stft(throat, **self.stft_args)[2].to(self.device)
+
             target_mag, target_pha, target_com = mag_pha_stft(acoustic, **self.stft_args)
             target_mag = target_mag.to(self.device)
             target_pha = target_pha.to(self.device)
@@ -289,8 +259,6 @@ class Solver(object):
             est_audio = mag_pha_istft(est_mag, est_pha, **self.stft_args)
             est_mag_con, _, est_com_con = mag_pha_stft(est_audio, **self.stft_args)
             est_mag_con = est_mag_con.to(self.device)
-
-            one_labels = torch.ones(throat.shape[0], device=self.device)
 
             # --- MetricGAN: Discriminator training ---
             loss_disc_scalar = 0.0
@@ -309,6 +277,7 @@ class Solver(object):
                 metric_g = self.discriminator(
                     target_mag.unsqueeze(1), est_mag_con.detach().unsqueeze(1))
 
+                one_labels = torch.ones(throat.shape[0], device=self.device)
                 loss_disc_r = F.mse_loss(one_labels, metric_r.flatten())
 
                 if batch_pesq_score is not None:
@@ -320,43 +289,12 @@ class Solver(object):
                 loss_disc = loss_disc_r + loss_disc_g
                 loss_disc.backward()
 
+                max_grad_norm = getattr(self.args, 'max_grad_norm', 5.0)
                 torch.nn.utils.clip_grad_norm_(
-                    self.discriminator.parameters(), max_norm=self.max_grad_norm)
+                    self.discriminator.parameters(), max_norm=max_grad_norm)
 
                 self.optim_disc.step()
                 loss_disc_scalar = loss_disc.item() if isinstance(loss_disc, torch.Tensor) else loss_disc
-
-            # --- Embedding MetricGAN: Discriminator training ---
-            loss_disc_emb_scalar = 0.0
-            n_frames = None
-            if self.disc_emb is not None:
-                self.disc_emb.train()
-
-                # Teacher target: enhanced quality only (no throat anchor)
-                acoustic_dev = acoustic.to(self.device)
-                z_ac = self.emb_extractor.extract_embeddings(acoustic_dev)
-                q_enhanced = self.emb_extractor.compute_frame_quality(
-                    acoustic_dev, est_audio.detach(), z_ac=z_ac)
-                n_frames = q_enhanced.shape[1]
-
-                self.optim_disc_emb.zero_grad()
-
-                metric_emb_r = self.disc_emb(
-                    target_mag.unsqueeze(1), target_mag.unsqueeze(1),
-                    n_frames=n_frames)
-                metric_emb_g = self.disc_emb(
-                    target_mag.unsqueeze(1), est_mag_con.detach().unsqueeze(1),
-                    n_frames=n_frames)
-
-                loss_disc_emb = (
-                    F.mse_loss(metric_emb_r, torch.ones_like(q_enhanced)) +
-                    F.mse_loss(metric_emb_g, q_enhanced))
-
-                loss_disc_emb.backward()
-                torch.nn.utils.clip_grad_norm_(
-                    self.disc_emb.parameters(), max_norm=self.max_grad_norm)
-                self.optim_disc_emb.step()
-                loss_disc_emb_scalar = loss_disc_emb.item()
 
             # --- Generator training ---
             loss_magnitude = F.mse_loss(target_mag, est_mag)
@@ -372,20 +310,11 @@ class Solver(object):
             # MetricGAN: generator adversarial loss
             loss_metric = torch.tensor(0.0, device=self.device)
             if self.discriminator is not None:
+                one_labels = torch.ones(throat.shape[0], device=self.device)
                 metric_g = self.discriminator(
                     target_mag.unsqueeze(1), est_mag_con.unsqueeze(1))
                 loss_metric = F.mse_loss(metric_g.flatten(), one_labels)
                 loss = loss + loss_metric * self.loss.get("metric", 0.0)
-
-            # Embedding MetricGAN: generator adversarial loss
-            loss_metric_emb = torch.tensor(0.0, device=self.device)
-            if self.disc_emb is not None:
-                metric_emb_g = self.disc_emb(
-                    target_mag.unsqueeze(1), est_mag_con.unsqueeze(1),
-                    n_frames=n_frames)
-                loss_metric_emb = F.mse_loss(
-                    metric_emb_g, torch.ones_like(metric_emb_g))
-                loss = loss + loss_metric_emb * self.loss.get("metric_emb", 0.0)
 
             loss_dict = {
                 "Magnitude_Loss": loss_magnitude,
@@ -393,9 +322,7 @@ class Solver(object):
                 "Complex_Loss": loss_complex,
                 "Consistency_Loss": loss_consistency,
                 "Metric_Loss": loss_metric,
-                "EmbMetric_Loss": loss_metric_emb,
                 "Disc_Loss": loss_disc_scalar,
-                "DiscEmb_Loss": loss_disc_emb_scalar,
                 "Total_Loss": loss
             }
 
@@ -405,7 +332,8 @@ class Solver(object):
             self.optim.zero_grad()
             loss.backward()
 
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.max_grad_norm)
+            max_grad_norm = getattr(self.args, 'max_grad_norm', 5.0)
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=max_grad_norm)
 
             self.optim.step()
 
@@ -421,7 +349,5 @@ class Solver(object):
             self.scheduler.step()
         if self.scheduler_disc is not None:
             self.scheduler_disc.step()
-        if self.scheduler_disc_emb is not None:
-            self.scheduler_disc_emb.step()
 
         return total_loss / len(self.tr_loader)

@@ -12,9 +12,12 @@
 #   # Pod 유지
 #   ./run_train.sh --keep-pod --fold 5 fold5_dpcrn
 #
+#   # Hydra override 추가
+#   ./run_train.sh --fold 5 fold5_no_emb embedding_loss.enabled=false
+#
 # Prerequisites:
 #   - runpodctl 설치 및 인증 완료
-#   - "enh-train" 이름의 RUNNING pod 존재 (create_pods.sh로 생성 및 셋업 완료)
+#   - "enh-train" 이름의 RUNNING pod 존재
 
 set -euo pipefail
 
@@ -58,7 +61,7 @@ log() {
 
 find_pod_id() {
     local matches
-    matches=$(runpodctl get pod 2>/dev/null | awk -v n="$POD_NAME" '$2 == n && /RUNNING/')
+    matches=$(runpodctl get pod 2>/dev/null | grep "$POD_NAME" | grep "RUNNING")
     local count
     count=$(echo "$matches" | grep -c . 2>/dev/null || true)
     if [[ "$count" -gt 1 ]]; then
@@ -116,9 +119,19 @@ SSH_HOST=$(echo "$SSH_CMD" | awk '{print $2}')
 SSH_PORT=$(echo "$SSH_CMD" | awk '{print $4}')
 log "SSH: $SSH_HOST port $SSH_PORT"
 
-# 2. Build training command
+# 2. Pod setup: clone/pull + dependencies
+log "Setting up pod (repo + dependencies)..."
+remote_exec "$SSH_HOST" "$SSH_PORT" \
+    "if [ -d $REMOTE_PROJECT/.git ]; then cd $REMOTE_PROJECT && git pull --ff-only; else cd /workspace && git clone https://github.com/yskim3271/mfa_enhancement.git; fi" \
+    2>&1 | tee -a "$LOG_FILE"
+
+remote_exec "$SSH_HOST" "$SSH_PORT" \
+    "apt-get update -qq && apt-get install -y -qq libsndfile1 ffmpeg > /dev/null 2>&1; cd $REMOTE_PROJECT && pip install -q --break-system-packages -r requirements.txt && pip install -q --break-system-packages transformers" \
+    2>&1 | tee -a "$LOG_FILE"
+
+# 3. Build training command
 HYDRA_DIR="./results/experiments/${EXP_NAME}"
-TRAIN_CMD="cd $REMOTE_PROJECT && python3 -m src.train hydra.run.dir=$HYDRA_DIR"
+TRAIN_CMD="cd $REMOTE_PROJECT && python3 -m src.train +model=dpcrn hydra.run.dir=$HYDRA_DIR"
 
 if [[ -n "$FOLD_INDEX" ]]; then
     TRAIN_CMD="$TRAIN_CMD cv.enabled=true cv.fold_index=$FOLD_INDEX"
@@ -132,17 +145,18 @@ done
 
 log "Training command: $TRAIN_CMD"
 
-# 3. Run training via nohup
+# 4. Run training via nohup
 REMOTE_LOG="/tmp/${EXP_NAME}_stdout.log"
 REMOTE_PID_FILE="/tmp/${EXP_NAME}_train.pid"
 REMOTE_EXIT_FILE="/tmp/${EXP_NAME}_train.exit"
 
 log "Starting training (nohup)..."
 remote_exec "$SSH_HOST" "$SSH_PORT" \
-    "rm -f $REMOTE_LOG $REMOTE_PID_FILE $REMOTE_EXIT_FILE"
-REMOTE_PID=$(remote_exec "$SSH_HOST" "$SSH_PORT" \
-    "nohup bash -c '$TRAIN_CMD > $REMOTE_LOG 2>&1; echo \$? > $REMOTE_EXIT_FILE' </dev/null >/dev/null 2>&1 &
-     echo \$! | tee $REMOTE_PID_FILE")
+    "rm -f $REMOTE_EXIT_FILE; nohup bash -c '$TRAIN_CMD > $REMOTE_LOG 2>&1; echo \$? > $REMOTE_EXIT_FILE' </dev/null >/dev/null 2>&1 &
+     echo \$! > $REMOTE_PID_FILE
+     sleep 1
+     cat $REMOTE_PID_FILE"
+REMOTE_PID=$(remote_exec "$SSH_HOST" "$SSH_PORT" "cat $REMOTE_PID_FILE 2>/dev/null")
 log "Remote training PID: $REMOTE_PID"
 
 # Wait for log to appear
@@ -154,12 +168,12 @@ for i in $(seq 1 60); do
     sleep 5
 done
 
-# 4. Stream logs via tail -f (reconnects if SSH drops)
+# 5. Stream logs via tail -f (reconnects if SSH drops)
 log "Streaming training logs..."
 LOCAL_LINE_COUNT=0
 while true; do
     SKIP=$((LOCAL_LINE_COUNT + 1))
-    remote_exec "$SSH_HOST" "$SSH_PORT" "tail -n +${SKIP} --pid=\$(cat $REMOTE_PID_FILE) -f $REMOTE_LOG" 2>&1 | tee -a "$LOG_FILE" || true
+    remote_exec "$SSH_HOST" "$SSH_PORT" "tail -n +${SKIP} -f $REMOTE_LOG | stdbuf -oL uniq" 2>&1 | tee -a "$LOG_FILE" || true
     LOCAL_LINE_COUNT=$(wc -l < "$LOG_FILE")
 
     if remote_exec "$SSH_HOST" "$SSH_PORT" "test -f $REMOTE_EXIT_FILE" 2>/dev/null; then
@@ -179,7 +193,7 @@ fi
 
 log "Training completed successfully!"
 
-# 5. Transfer results
+# 6. Transfer results
 log "Transferring results from pod..."
 LOCAL_EXP_DIR="$RESULTS_DIR/$EXP_NAME"
 mkdir -p "$LOCAL_EXP_DIR"
@@ -199,7 +213,7 @@ else
     log "WARNING: Could not transfer result files. Check pod manually."
 fi
 
-# 6. Terminate pod (unless --keep-pod)
+# 7. Terminate pod (unless --keep-pod)
 if [[ "$KEEP_POD" == "false" ]]; then
     log "Terminating pod $POD_ID..."
     runpodctl remove pod "$POD_ID" 2>&1 | tee -a "$LOG_FILE"

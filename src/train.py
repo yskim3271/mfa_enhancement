@@ -1,6 +1,5 @@
 import os
 import sys
-import math
 import logging
 import hydra
 import random
@@ -18,53 +17,42 @@ from .utils import load_model
 torch.backends.cudnn.benchmark = True
 
 
-def create_scheduler(optimizer, args):
-    """Create LR scheduler from config.
+def _get_taps_speaker_groups():
+    """Return gender-balanced speaker groups for TAPS 5-fold CV.
 
-    Supports:
-      - scheduler.type=cosine : CosineAnnealing with linear warmup
-      - scheduler.type=exponential : ExponentialLR (per-epoch gamma decay)
-      - (legacy) lr_decay=0.99 : falls back to ExponentialLR
+    Each group has exactly 12 speakers (6M + 6F), 1200 utterances.
+    Must match TAPS_SPEAKER_TO_FOLD in src/core/config/folds.py.
     """
-    sched_cfg = args.get("scheduler", None)
-
-    # Legacy fallback: lr_decay without scheduler section
-    if sched_cfg is None:
-        lr_decay = getattr(args, "lr_decay", None)
-        if lr_decay is not None:
-            return torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=lr_decay)
-        return None
-
-    sched_type = sched_cfg.get("type", "cosine")
-    total_epochs = args.epochs
-
-    if sched_type == "exponential":
-        gamma = sched_cfg.get("gamma", 0.99)
-        return torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=gamma)
-
-    if sched_type == "cosine":
-        warmup_epochs = sched_cfg.get("warmup_epochs", 0)
-        min_lr = sched_cfg.get("min_lr", 0)
-        peak_lr = optimizer.param_groups[0]["lr"]
-
-        def lr_lambda(epoch):
-            if warmup_epochs > 0 and epoch < warmup_epochs:
-                return (epoch + 1) / warmup_epochs
-            progress = (epoch - warmup_epochs) / max(total_epochs - warmup_epochs, 1)
-            cosine_val = 0.5 * (1 + math.cos(math.pi * progress))
-            return min_lr / peak_lr + (1 - min_lr / peak_lr) * cosine_val
-
-        return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
-
-    raise ValueError(f"Unknown scheduler type: {sched_type}")
+    TAPS_SPEAKER_TO_FOLD = {
+        "p00": 1, "p01": 1, "p02": 2, "p03": 1, "p04": 3,
+        "p06": 2, "p07": 3, "p08": 4, "p09": 5, "p10": 1,
+        "p11": 2, "p12": 2, "p14": 3, "p15": 4, "p16": 3,
+        "p17": 4, "p18": 5, "p19": 1, "p20": 2, "p21": 4,
+        "p22": 5, "p23": 1, "p24": 1, "p25": 3, "p26": 2,
+        "p27": 2, "p28": 3, "p29": 4, "p32": 3, "p33": 4,
+        "p34": 5, "p35": 5, "p36": 1, "p38": 5, "p41": 4,
+        "p42": 2, "p43": 1, "p44": 3, "p46": 4, "p47": 5,
+        "p48": 1, "p49": 2, "p50": 2, "p51": 3, "p52": 3,
+        "p53": 4, "p54": 5, "p56": 5, "p59": 1, "p60": 4,
+        "p61": 5, "p62": 1, "p63": 2, "p64": 2, "p65": 3,
+        "p66": 4, "p67": 3, "p68": 4, "p69": 5, "p70": 5,
+    }
+    groups = [[] for _ in range(5)]
+    for spk, fold in TAPS_SPEAKER_TO_FOLD.items():
+        groups[fold - 1].append(spk)
+    return groups
 
 
-def create_kfold_splits(dataset, fold_index, num_folds=5, seed=2039):
+def create_kfold_splits(dataset, fold_index, num_folds=5, seed=2039, speaker_groups=None):
     """N-group rotation K-Fold CV with speaker-disjoint splits.
 
     Splits speakers into N balanced groups using sorted-greedy bin packing
     (by utterance count), then rotates test/valid/train assignments:
         Fold i (1-based): test=group[(i-1)%N], valid=group[i%N], train=rest
+
+    If speaker_groups is provided (list of lists of speaker IDs), it overrides
+    the automatic bin-packing. This allows external fold definitions (e.g.,
+    gender-balanced splits) to be injected.
     """
     from collections import defaultdict
 
@@ -78,17 +66,22 @@ def create_kfold_splits(dataset, fold_index, num_folds=5, seed=2039):
     speakers = list(speaker_to_indices.keys())
     total_speakers = len(speakers)
 
-    # Sorted-greedy bin packing: largest speakers first → smallest-sum group
-    speakers.sort(key=lambda s: len(speaker_to_indices[s]), reverse=True)
+    if speaker_groups is not None:
+        # Use externally provided groups
+        groups = speaker_groups
+        group_sizes = [sum(len(speaker_to_indices[spk]) for spk in g) for g in groups]
+    else:
+        # Sorted-greedy bin packing: largest speakers first → smallest-sum group
+        speakers.sort(key=lambda s: len(speaker_to_indices[s]), reverse=True)
 
-    groups = [[] for _ in range(num_folds)]
-    group_sizes = [0] * num_folds
+        groups = [[] for _ in range(num_folds)]
+        group_sizes = [0] * num_folds
 
-    for spk in speakers:
-        spk_size = len(speaker_to_indices[spk])
-        smallest = min(range(num_folds), key=lambda g: group_sizes[g])
-        groups[smallest].append(spk)
-        group_sizes[smallest] += spk_size
+        for spk in speakers:
+            spk_size = len(speaker_to_indices[spk])
+            smallest = min(range(num_folds), key=lambda g: group_sizes[g])
+            groups[smallest].append(spk)
+            group_sizes[smallest] += spk_size
 
     # Group rotation (fold_index is 1-based)
     test_group = (fold_index - 1) % num_folds
@@ -186,8 +179,7 @@ def run(args):
     elif args.optim in ("adamW", "adamw"):
         optim_class = torch.optim.AdamW
 
-    wd = getattr(args, "weight_decay", 0.01)
-    optim = optim_class(model.parameters(), lr=args.lr, betas=args.betas, weight_decay=wd)
+    optim = optim_class(model.parameters(), lr=args.lr, betas=args.betas)
 
     # MetricGAN discriminator (optional)
     discriminator = None
@@ -198,14 +190,16 @@ def run(args):
     if metricgan_cfg.get("enabled", False):
         from .models.discriminator import MetricGAN_Discriminator
         discriminator = MetricGAN_Discriminator().to(device)
-        optim_disc = optim_class(discriminator.parameters(), lr=args.lr, betas=args.betas, weight_decay=wd)
+        optim_disc = optim_class(discriminator.parameters(), lr=args.lr, betas=args.betas)
         disc_params = sum(p.numel() for p in discriminator.parameters())
         logger.info(f"MetricGAN discriminator enabled: {disc_params / 1_000_000:.2f} M params")
 
     # Scheduler
-    scheduler = create_scheduler(optim, args)
-    if discriminator is not None:
-        scheduler_disc = create_scheduler(optim_disc, args)
+    scheduler = None
+    if args.lr_decay is not None:
+        scheduler = torch.optim.lr_scheduler.ExponentialLR(optim, gamma=args.lr_decay, last_epoch=-1)
+        if discriminator is not None:
+            scheduler_disc = torch.optim.lr_scheduler.ExponentialLR(optim_disc, gamma=args.lr_decay, last_epoch=-1)
 
     # Load Vibravox dataset
     logger.info(f"Loading dataset: {args.dataset}")
@@ -220,11 +214,17 @@ def run(args):
         logger.info(f"[K-Fold CV] Fold {cv_config.fold_index}/{cv_config.num_folds}")
         logger.info(f"[K-Fold CV] Total samples: {len(all_data)}")
 
+        # Use gender-balanced groups for TAPS dataset
+        speaker_groups = None
+        if "Throat_and_Acoustic_Pairing_Speech_Dataset" in args.dataset:
+            speaker_groups = _get_taps_speaker_groups()
+
         trainset, validset, testset, fold_info = create_kfold_splits(
             dataset=all_data,
             fold_index=cv_config.fold_index,
             num_folds=cv_config.num_folds,
-            seed=args.seed
+            seed=args.seed,
+            speaker_groups=speaker_groups,
         )
 
         logger.info(f"[K-Fold CV] Train: {len(trainset)}, Dev: {len(validset)}, Test: {len(testset)}")
@@ -283,29 +283,6 @@ def run(args):
         "ev_loader": ev_loader,
     }
 
-    # Embedding MetricGAN (optional)
-    disc_emb = None
-    optim_disc_emb = None
-    scheduler_disc_emb = None
-    emb_extractor = None
-
-    emb_metricgan_cfg = args.get("embedding_metricgan", {})
-    if emb_metricgan_cfg.get("enabled", False):
-        from .embedding_extractor import EmbeddingQualityExtractor
-        from .models.discriminator import FrameLevelEmbeddingCritic
-
-        emb_extractor = EmbeddingQualityExtractor(
-            model_name=emb_metricgan_cfg.model_name,
-            layers=list(emb_metricgan_cfg.layers),
-        ).to(device)
-
-        disc_emb = FrameLevelEmbeddingCritic(ndf=16).to(device)
-        optim_disc_emb = optim_class(disc_emb.parameters(), lr=args.lr, betas=args.betas, weight_decay=wd)
-        scheduler_disc_emb = create_scheduler(optim_disc_emb, args)
-
-        disc_emb_params = sum(p.numel() for p in disc_emb.parameters())
-        logger.info(f"Embedding MetricGAN enabled: {disc_emb_params / 1_000_000:.2f} M params")
-
     # Solver
     solver = Solver(
         data=dataloader,
@@ -318,10 +295,6 @@ def run(args):
         discriminator=discriminator,
         optim_disc=optim_disc,
         scheduler_disc=scheduler_disc,
-        disc_emb=disc_emb,
-        optim_disc_emb=optim_disc_emb,
-        scheduler_disc_emb=scheduler_disc_emb,
-        emb_extractor=emb_extractor,
     )
     solver.train()
     sys.exit(0)
